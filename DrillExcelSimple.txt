@@ -1,0 +1,21 @@
+'=== Module: DrillThroughAt.bas ===
+Option Explicit
+
+' Drills the pivot value at the given cell address and writes the new sheet name to outputCellAddr.
+' wsName: sheet that contains the pivot
+' address: address of the pivot value cell to drill (e.g., "B10")
+' outputCellAddr: where to write the name of the created detail sheet (defaults to "Z1" on wsName)
+Public Sub DrillThroughAt(wsName As String, address As String, Optional outputCellAddr As String = "Z1")
+    Dim ws As Worksheet, tgt As Range, newSheet As Worksheet
+    Set ws = ThisWorkbook.Worksheets(wsName)
+    Set tgt = ws.Range(address)
+
+    If tgt Is Nothing Then Err.Raise vbObjectError + 1, , "Target cell not found: " & address
+    If tgt.PivotCell Is Nothing Then Err.Raise vbObjectError + 2, , "Cell is not inside a PivotTable: " & address
+
+    Application.ScreenUpdating = False
+    tgt.ShowDetail = True            ' <-- this performs the actual "double-click" drill
+    Set newSheet = ActiveSheet       ' Excel activates the newly created sheet
+    ws.Range(outputCellAddr).Value = newSheet.Name
+    Application.ScreenUpdating = True
+End Sub
