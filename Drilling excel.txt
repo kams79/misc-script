@@ -1,0 +1,186 @@
+Option Explicit
+
+' Entry point for UiPath Invoke VBA
+' Params:
+'   pivotSheetName   = sheet that contains the PivotTable (e.g., "Pivot")
+'   pivotName        = PivotTable.Name (e.g., "PivotTable1")
+'   targetCellAddr   = (optional) cell address like "G25". If provided, we drill this cell directly.
+'                      If empty, we will auto-find a Grand Total cell based on "whichGrand".
+'   valuesFieldName  = (optional) the DataField (Values field) to match, e.g., "Sum of Amount".
+'                      Leave "" to accept the first matching grand total.
+'   whichGrand       = "row" | "column" | "first"
+'                      row    -> looks in the last column of the pivot data area
+'                      column -> looks in the last row of the pivot data area
+'                      first  -> first grand total it finds anywhere in the table
+'   outputSheetName  = sheet name to assign to the generated detail sheet (Excel appends (2), (3) if needed)
+'   exportPath       = (optional) full path to save new workbook (e.g. "C:\Temp\DrillResult.xlsx").
+'                      If "", export is skipped.
+'   deleteTempSheet  = (optional) "True" or "False". If "True", delete the drill sheet in the source after export.
+Public Sub DrillPivot( _
+    ByVal pivotSheetName As String, _
+    ByVal pivotName As String, _
+    ByVal targetCellAddr As String, _
+    ByVal valuesFieldName As String, _
+    ByVal whichGrand As String, _
+    ByVal outputSheetName As String, _
+    Optional ByVal exportPath As String = "", _
+    Optional ByVal deleteTempSheet As String = "False")
+
+    Dim ws As Worksheet, pt As PivotTable
+    Set ws = ThisWorkbook.Worksheets(pivotSheetName)
+    Set pt = ws.PivotTables(pivotName)
+    pt.EnableDrilldown = True
+
+    Dim tgt As Range
+    If Len(Trim$(targetCellAddr)) > 0 Then
+        ' Mode 1: direct cell address
+        Set tgt = ws.Range(targetCellAddr)
+    Else
+        ' Mode 2/3: find a Grand Total cell
+        Set tgt = FindGrandTotalCell(pt, valuesFieldName, whichGrand)
+        If tgt Is Nothing Then Err.Raise vbObjectError + 513, , "Grand Total cell not found. Check grand totals visibility / field name."
+    End If
+
+    ' Trigger Excel drill-through (same as double-click)
+    tgt.ShowDetail = True
+
+    ' Rename created sheet
+    On Error Resume Next
+    ActiveSheet.Name = outputSheetName
+    Err.Clear
+    On Error GoTo 0
+
+    Dim detail As Worksheet
+    Set detail = ActiveSheet
+
+    ' --- Optional export ---
+    If Len(Trim$(exportPath)) > 0 Then
+        If Not FolderExists(GetFolderPath(exportPath)) Then
+            Err.Raise vbObjectError + 514, , "Export folder doesn't exist: " & GetFolderPath(exportPath)
+        End If
+
+        Application.DisplayAlerts = False
+        detail.Copy                 ' creates a NEW single-sheet workbook from "detail"
+        With ActiveWorkbook
+            .SaveAs Filename:=exportPath, FileFormat:=GetFileFormatFromPath(exportPath)
+            .Close SaveChanges:=False
+        End With
+        Application.DisplayAlerts = True
+    End If
+
+    ' --- Optional cleanup of temp sheet in source workbook ---
+    If StrComp(deleteTempSheet, "True", vbTextCompare) = 0 Then
+        Application.DisplayAlerts = False
+        detail.Delete
+        Application.DisplayAlerts = True
+    End If
+End Sub
+
+
+' Find a Grand Total cell inside a PivotTable based on preferred location and optional DataField name.
+' whichGrand = "row" | "column" | "first"
+Private Function FindGrandTotalCell(ByVal pt As PivotTable, ByVal valuesFieldName As String, ByVal whichGrand As String) As Range
+    Const xlPivotCellGrandTotal As Long = 22
+
+    Dim dataArea As Range, tableArea As Range
+    Set tableArea = pt.TableRange2
+    On Error Resume Next
+    Set dataArea = pt.DataBodyRange    ' can be Nothing for some layouts
+    On Error GoTo 0
+
+    Dim lastRow As Long, lastCol As Long
+    If Not dataArea Is Nothing Then
+        lastRow = dataArea.Rows(dataArea.Rows.Count).Row
+        lastCol = dataArea.Columns(dataArea.Columns.Count).Column
+    Else
+        lastRow = -1
+        lastCol = -1
+    End If
+
+    Dim c As Range
+    Dim firstHit As Range
+
+    For Each c In tableArea.Cells
+        On Error Resume Next
+        If Not c.PivotCell Is Nothing Then
+            If c.PivotCell.PivotCellType = xlPivotCellGrandTotal Then
+                ' Optional: match a particular Values field
+                If Len(Trim$(valuesFieldName)) > 0 Then
+                    If Not c.PivotCell.DataField Is Nothing Then
+                        If StrComp(c.PivotCell.DataField.SourceName, valuesFieldName, vbTextCompare) <> 0 _
+                           And StrComp(c.PivotCell.DataField.Name, valuesFieldName, vbTextCompare) <> 0 Then
+                            GoTo NextCell
+                        End If
+                    Else
+                        GoTo NextCell
+                    End If
+                End If
+
+                ' Keep first match if needed
+                If firstHit Is Nothing Then Set firstHit = c
+
+                ' If caller specified row/column, try to pinpoint by position in data area
+                Select Case LCase$(whichGrand)
+                    Case "row"
+                        If lastCol > 0 Then
+                            If c.Column = lastCol Then Set FindGrandTotalCell = c: Exit Function
+                        End If
+                    Case "column"
+                        If lastRow > 0 Then
+                            If c.Row = lastRow Then Set FindGrandTotalCell = c: Exit Function
+                        End If
+                    Case "first"
+                        Set FindGrandTotalCell = c
+                        Exit Function
+                End Select
+            End If
+        End If
+NextCell:
+        On Error GoTo 0
+    Next c
+
+    ' Fallbacks
+    If Not firstHit Is Nothing Then
+        Set FindGrandTotalCell = firstHit
+    Else
+        Set FindGrandTotalCell = Nothing
+    End If
+End Function
+
+
+' ---- Helpers for export ----
+
+Private Function GetFileFormatFromPath(ByVal path As String) As Long
+    Dim ext As String, dotPos As Long
+    dotPos = InStrRev(path, ".")
+    If dotPos > 0 Then
+        ext = LCase$(Mid$(path, dotPos + 1))
+    Else
+        ext = ""
+    End If
+
+    Select Case ext
+        Case "xlsx": GetFileFormatFromPath = 51          ' xlOpenXMLWorkbook
+        Case "xlsm": GetFileFormatFromPath = 52          ' xlOpenXMLWorkbookMacroEnabled
+        Case "xlsb": GetFileFormatFromPath = 50          ' xlExcel12 (binary)
+        Case "xls":  GetFileFormatFromPath = 56          ' xlExcel8 (97-2003)
+        Case "csv":  GetFileFormatFromPath = 6           ' xlCSV
+        Case Else:   GetFileFormatFromPath = 51          ' default to xlsx
+    End Select
+End Function
+
+Private Function GetFolderPath(ByVal fullPath As String) As String
+    Dim p As Long
+    p = InStrRev(fullPath, Application.PathSeparator)
+    If p > 0 Then
+        GetFolderPath = Left$(fullPath, p - 1)
+    Else
+        GetFolderPath = ""
+    End If
+End Function
+
+Private Function FolderExists(ByVal folderPath As String) As Boolean
+    On Error Resume Next
+    FolderExists = CreateObject("Scripting.FileSystemObject").FolderExists(folderPath)
+    On Error GoTo 0
+End Function
