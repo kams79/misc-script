@@ -1,0 +1,121 @@
+' VBA Code to be saved in DrillMacro.txt
+' MODIFIED HEADLESS VERSION: Adds the drill-down sheet to a target workbook,
+' creating it if necessary and handling duplicate sheet names.
+
+Public Function DrillAndExportPivotGrandTotal(ByVal pivotSheetName As String, ByVal pivotTableName As String, ByVal newSheetName As String, ByVal newWorkbookPath As String) As String
+
+    ' --- Declare variables ---
+    Dim wb As Workbook
+    Dim wsPivot As Worksheet
+    Dim pt As PivotTable
+    Dim rngDrillCell As Range
+    Dim wsDrillTemp As Worksheet
+    Dim targetWB As Workbook
+    Dim finalSheetName As String
+
+    ' --- Set Application properties for headless execution ---
+    Application.ScreenUpdating = False ' Prevents screen flickering for speed
+    Application.DisplayAlerts = False  ' Prevents all pop-up alerts
+
+    On Error GoTo ErrorHandler
+
+    ' --- Initialize objects for the source workbook ---
+    Set wb = ThisWorkbook
+    Set wsPivot = wb.Worksheets(pivotSheetName)
+    Set pt = wsPivot.PivotTables(pivotTableName)
+
+    ' --- Identify the grand total cell ---
+    With pt.TableRange2
+        Set rngDrillCell = .Cells(.Rows.Count, .Columns.Count)
+    End With
+
+    ' --- Perform the drill-down in the source workbook ---
+    rngDrillCell.ShowDetail = True
+    Set wsDrillTemp = ActiveSheet ' Capture the temporary drill-down sheet
+
+    ' --- NEW LOGIC: Open or Create the Target Workbook ---
+    ' Check if the target workbook file exists.
+    If Dir(newWorkbookPath) <> "" Then
+        ' If it exists, open it.
+        Set targetWB = Workbooks.Open(newWorkbookPath)
+    Else
+        ' If it doesn't exist, create a new one.
+        Set targetWB = Workbooks.Add
+    End If
+
+    ' --- NEW LOGIC: Check for and resolve sheet name conflicts ---
+    Dim sheetExists As Boolean
+    Dim i As Integer
+    finalSheetName = newSheetName
+    i = 1
+    Do
+        sheetExists = False
+        Dim sh As Worksheet
+        For Each sh In targetWB.Worksheets
+            ' Compare names, ignoring case
+            If LCase(sh.Name) = LCase(finalSheetName) Then
+                sheetExists = True
+                ' If name exists, append a number and check again
+                finalSheetName = newSheetName & " (" & i & ")"
+                i = i + 1
+                Exit For
+            End If
+        Next sh
+    Loop While sheetExists
+
+    ' --- NEW LOGIC: Copy the drill-down sheet to the target workbook ---
+    ' Copy the temp sheet to the end of the target workbook.
+    wsDrillTemp.Copy After:=targetWB.Sheets(targetWB.Sheets.Count)
+    
+    ' The newly copied sheet is now the active one in the target workbook. Rename it.
+    targetWB.ActiveSheet.Name = finalSheetName
+
+    ' --- Clean up the temporary drill-down sheet from the source workbook ---
+    wsDrillTemp.Delete '<-- THIS IS THE LINE THAT CLEANS THE SOURCE WORKBOOK
+
+    ' --- NEW LOGIC: Remove default "Sheet1" if a new workbook was created ---
+    If targetWB.Worksheets.Count > 1 And LCase(targetWB.Worksheets(1).Name) = "sheet1" Then
+        targetWB.Worksheets(1).Delete
+    End If
+
+    ' --- Save and close the target workbook ---
+    ' SaveAs works for both new and existing files, overwriting without a prompt
+    ' because DisplayAlerts is False.
+    targetWB.SaveAs Filename:=newWorkbookPath, FileFormat:=xlOpenXMLWorkbook ' xlOpenXMLWorkbook is for .xlsx
+    targetWB.Close SaveChanges:=False
+
+    ' --- Set the SUCCESS return value for the function ---
+    DrillAndExportPivotGrandTotal = "Success: Sheet '" & finalSheetName & "' added to workbook " & newWorkbookPath
+
+    GoTo CleanUp
+
+ErrorHandler:
+    ' --- Set the FAILED return value with error details ---
+    DrillAndExportPivotGrandTotal = "Failed: Error " & Err.Number & " - " & Err.Description
+    
+    ' Attempt to close the target workbook if it was opened
+    If Not targetWB Is Nothing Then
+        targetWB.Close SaveChanges:=False
+    End If
+    
+    ' Attempt to delete the temp sheet if it was created
+    If Not wsDrillTemp Is Nothing Then
+        On Error Resume Next ' Ignore error if sheet was already deleted or doesn't exist
+        wsDrillTemp.Delete
+        On Error GoTo 0
+    End If
+
+CleanUp:
+    ' --- IMPORTANT: Restore original application settings ---
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    ' --- Release all objects from memory ---
+    Set targetWB = Nothing
+    Set wsDrillTemp = Nothing
+    Set rngDrillCell = Nothing
+    Set pt = Nothing
+    Set wsPivot = Nothing
+    Set wb = Nothing
+
+End Function
