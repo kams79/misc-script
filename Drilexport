@@ -1,0 +1,67 @@
+' VBA Code to be saved in DrillMacro.txt
+' FINAL HEADLESS VERSION: Disables all UI prompts and screen updates.
+
+Public Function DrillAndExportPivotGrandTotal(ByVal pivotSheetName As String, ByVal pivotTableName As String, ByVal newSheetName As String, ByVal newWorkbookPath As String) As String
+
+    ' --- Declare variables ---
+    Dim wb As Workbook
+    Dim newWB As Workbook
+    Dim wsPivot As Worksheet
+    Dim pt As PivotTable
+    Dim rngDrillCell As Range
+    Dim wsNew As Worksheet
+
+    ' --- Set Application properties for headless execution ---
+    Application.ScreenUpdating = False ' Prevents screen flickering for speed
+    Application.DisplayAlerts = False  ' Prevents all pop-up alerts (e.g., "overwrite file?")
+
+    On Error GoTo ErrorHandler
+
+    ' --- Initialize objects for the source workbook ---
+    Set wb = ThisWorkbook
+    Set wsPivot = wb.Worksheets(pivotSheetName)
+    Set pt = wsPivot.PivotTables(pivotTableName)
+
+    ' --- Identify the grand total cell ---
+    With pt.TableRange2
+        Set rngDrillCell = .Cells(.Rows.Count, .Columns.Count)
+    End With
+
+    ' --- Perform the drill-down ---
+    rngDrillCell.ShowDetail = True
+
+    ' --- The new sheet is now the active sheet. Copy it to a new workbook. ---
+    Set wsNew = ActiveSheet
+    wsNew.Name = newSheetName
+    wsNew.Copy ' This creates a new workbook with the copied sheet.
+
+    ' --- The new workbook is now the active one. Save and close it. ---
+    Set newWB = ActiveWorkbook
+    
+    ' Save the new workbook to the specified path.
+    newWB.SaveAs Filename:=newWorkbookPath, FileFormat:=xlOpenXMLWorkbook ' xlOpenXMLWorkbook is for .xlsx
+    newWB.Close SaveChanges:=False ' Close the new workbook.
+
+    ' --- Set the SUCCESS return value for the function ---
+    DrillAndExportPivotGrandTotal = "Success: Drill-down completed and new workbook saved to " & newWorkbookPath
+    
+    GoTo CleanUp
+
+ErrorHandler:
+    ' --- Set the FAILED return value with error details ---
+    DrillAndExportPivotGrandTotal = "Failed: Error " & Err.Number & " - " & Err.Description
+
+CleanUp:
+    ' --- IMPORTANT: Restore original application settings ---
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    ' --- Release all objects from memory ---
+    Set newWB = Nothing
+    Set wsNew = Nothing
+    Set rngDrillCell = Nothing
+    Set pt = Nothing
+    Set wsPivot = Nothing
+    Set wb = Nothing
+
+End Function
