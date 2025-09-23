@@ -1,0 +1,220 @@
+Option Explicit
+
+' Entry point for UiPath Invoke VBA
+' Params (all strings; UiPath passes Variants ok):
+'   sheetName       - e.g. "Sheet1"
+'   outputFolder    - e.g. "C:\Temp\ExcelExports"
+'   includeCharts   - "True" / "False"
+'   nameContains    - optional filter (substring) for Shape.Name; "" = no filter
+'   onlyVisible     - "True" / "False"
+'   formatName      - "PNG" | "JPG" | "BMP" | "GIF" | "TIF"
+Public Sub ExportImagesFromSheet( _
+    ByVal sheetName As String, _
+    ByVal outputFolder As String, _
+    ByVal includeCharts As String, _
+    ByVal nameContains As String, _
+    ByVal onlyVisible As String, _
+    ByVal formatName As String _
+)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ActiveWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Err.Raise vbObjectError + 513, , "Worksheet '" & sheetName & "' not found."
+    End If
+
+    If Len(Dir(outputFolder, vbDirectory)) = 0 Then
+        CreateFoldersRecursive outputFolder
+    End If
+
+    Dim exportCharts As Boolean: exportCharts = (UCase$(includeCharts) = "TRUE")
+    Dim filterStr As String:     filterStr = CStr(nameContains)
+    Dim checkVisible As Boolean: checkVisible = (UCase$(onlyVisible) = "TRUE")
+    Dim fmt As String:           fmt = UCase$(formatName)
+    If fmt = "" Then fmt = "PNG"
+
+    Dim allowedFmt As String
+    allowedFmt = "|PNG|JPG|GIF|BMP|TIF|"
+    If InStr(1, allowedFmt, "|" & fmt & "|", vbTextCompare) = 0 Then
+        fmt = "PNG"
+    End If
+
+    Dim listCSV As String
+    listCSV = "name,type,filename" & vbCrLf
+
+    Dim shp As Shape, exportedFile As String, did As Boolean
+    Dim baseName As String, safeName As String, idx As Long: idx = 0
+
+    ' 1) Export pictures / picture-like shapes
+    For Each shp In ws.Shapes
+        If ShouldExportShape(shp, filterStr, checkVisible, exportCharts) Then
+            idx = idx + 1
+            baseName = shp.Name
+            safeName = SanitizeFileName(baseName)
+            exportedFile = outputFolder & "\" & Format$(idx, "0000") & "_" & safeName & "." & LCase$(fmt)
+
+            did = TryShapeExport shp, exportedFile, fmt
+            If Not did Then did = FallbackCopyViaTempChart(shp, ws, exportedFile, fmt)
+
+            If did Then
+                listCSV = listCSV & CSV(baseName) & "," & CSV(TypeNameFromShape(shp)) & "," & CSV(exportedFile) & vbCrLf
+            End If
+        End If
+    Next shp
+
+    ' 2) Export embedded ChartObjects (safer path for charts)
+    If exportCharts Then
+        Dim co As ChartObject
+        For Each co In ws.ChartObjects
+            idx = idx + 1
+            baseName = co.Name
+            safeName = SanitizeFileName(baseName)
+            exportedFile = outputFolder & "\" & Format$(idx, "0000") & "_" & safeName & "." & LCase$(fmt)
+
+            did = False
+            On Error Resume Next
+            did = co.Chart.Export(exportedFile, fmt, False)
+            On Error GoTo 0
+            If Not did Then
+                ' fallback via copy
+                did = FallbackCopyChartViaTempChart co, ws, exportedFile, fmt
+            End If
+
+            If did Then
+                listCSV = listCSV & CSV(baseName) & ",ChartObject," & CSV(exportedFile) & vbCrLf
+            End If
+        Next co
+    End If
+
+    ' 3) Write a manifest CSV next to outputs (so UiPath can read results)
+    Dim manifest As String
+    manifest = outputFolder & "\_export_manifest.csv"
+    WriteTextFile manifest, listCSV
+End Sub
+
+Private Function ShouldExportShape(ByVal shp As Shape, ByVal nameContains As String, ByVal onlyVisible As Boolean, ByVal includeCharts As Boolean) As Boolean
+    Dim ok As Boolean: ok = True
+
+    If onlyVisible Then
+        If shp.Visible <> msoTrue Then ok = False
+    End If
+
+    If nameContains <> "" Then
+        If InStr(1, shp.Name, nameContains, vbTextCompare) = 0 Then ok = False
+    End If
+
+    ' Include pictures/linked pictures; optionally charts
+    Select Case shp.Type
+        Case msoPicture, msoLinkedPicture
+            ' ok
+        Case msoChart
+            ok = ok And includeCharts
+        Case msoGroup
+            ' group can still be exported via fallback; allow it
+            ok = ok
+        Case Else
+            ' skip other types (text boxes, connectors, etc.)
+            ok = False
+    End Select
+
+    ShouldExportShape = ok
+End Function
+
+Private Function TryShapeExport(ByVal shp As Shape, ByVal filePath As String, ByVal fmt As String) As Boolean
+    On Error GoTo FAIL
+    shp.Export filePath, fmt, 0, 0, msoFalse
+    TryShapeExport = (Len(Dir(filePath)) > 0)
+    Exit Function
+FAIL:
+    TryShapeExport = False
+End Function
+
+' Works around grouped/complex shapes by copying as picture to a temp chart and exporting the chart
+Private Function FallbackCopyViaTempChart(ByVal shp As Shape, ByVal ws As Worksheet, ByVal filePath As String, ByVal fmt As String) As Boolean
+    On Error GoTo FAIL
+    shp.CopyPicture Appearance:=xlPrinter, Format:=xlPicture
+    Dim tmp As ChartObject
+    Set tmp = ws.ChartObjects.Add(Left:=shp.Left, Top:=shp.Top, Width:=shp.Width, Height:=shp.Height)
+    tmp.Chart.Paste
+    DoEvents
+    tmp.Chart.Export filePath, fmt, False
+    tmp.Delete
+    FallbackCopyViaTempChart = (Len(Dir(filePath)) > 0)
+    Exit Function
+FAIL:
+    On Error Resume Next
+    If Not tmp Is Nothing Then tmp.Delete
+    On Error GoTo 0
+    FallbackCopyViaTempChart = False
+End Function
+
+Private Function FallbackCopyChartViaTempChart(ByVal co As ChartObject, ByVal ws As Worksheet, ByVal filePath As String, ByVal fmt As String) As Boolean
+    On Error GoTo FAIL
+    co.Chart.ChartArea.Copy
+    Dim tmp As ChartObject
+    Set tmp = ws.ChartObjects.Add(Left:=co.Left, Top:=co.Top, Width:=co.Width, Height:=co.Height)
+    tmp.Chart.Paste
+    DoEvents
+    tmp.Chart.Export filePath, fmt, False
+    tmp.Delete
+    FallbackCopyChartViaTempChart = (Len(Dir(filePath)) > 0)
+    Exit Function
+FAIL:
+    On Error Resume Next
+    If Not tmp Is Nothing Then tmp.Delete
+    On Error GoTo 0
+    FallbackCopyChartViaTempChart = False
+End Function
+
+Private Function TypeNameFromShape(ByVal shp As Shape) As String
+    Select Case shp.Type
+        Case msoPicture:        TypeNameFromShape = "Picture"
+        Case msoLinkedPicture:  TypeNameFromShape = "LinkedPicture"
+        Case msoChart:          TypeNameFromShape = "Chart"
+        Case msoGroup:          TypeNameFromShape = "Group"
+        Case Else:              TypeNameFromShape = "Other"
+    End Select
+End Function
+
+Private Function SanitizeFileName(ByVal s As String) As String
+    Dim bad As Variant, i As Long
+    bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+    For i = LBound(bad) To UBound(bad)
+        s = Replace$(s, bad(i), "_")
+    Next i
+    SanitizeFileName = s
+End Function
+
+Private Sub CreateFoldersRecursive(ByVal path As String)
+    Dim parts() As String, i As Long, p As String
+    parts = Split(path, "\")
+    p = ""
+    For i = LBound(parts) To UBound(parts)
+        If p = "" Then
+            p = parts(i)
+        Else
+            p = p & "\" & parts(i)
+        End If
+        If Len(p) > 0 Then
+            If Len(Dir(p, vbDirectory)) = 0 Then
+                On Error Resume Next
+                MkDir p
+                On Error GoTo 0
+            End If
+        End If
+    Next i
+End Sub
+
+Private Sub WriteTextFile(ByVal filePath As String, ByVal content As String)
+    Dim f As Integer
+    f = FreeFile
+    Open filePath For Output As #f
+    Print #f, content
+    Close #f
+End Sub
+
+Private Function CSV(ByVal s As String) As String
+    s = Replace$(s, """", """""")
+    CSV = """" & s & """"
+End Function
